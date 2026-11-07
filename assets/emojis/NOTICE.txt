@@ -1,0 +1,4 @@
+Emoji sprites in this folder were rendered from Noto Color Emoji.
+Noto Emoji artwork is copyright Google Inc. and Arjen Nienhuis and is
+distributed under the SIL Open Font License 1.1.
+Source: https://github.com/googlefonts/noto-emoji
