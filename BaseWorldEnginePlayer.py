@@ -1,3 +1,4 @@
+import random
 from pathlib import Path
 
 from ursina import (
@@ -24,26 +25,48 @@ PLAYER_MODEL = load_model("model.obj", folder=ASSET_DIR, use_deepcopy=True)
 PLAYER_TEXTURE = load_texture("Material_baseColor.png", folder=ASSET_DIR)
 PLAYER_MODEL_SCALE = 0.75
 PLAYER_MODEL_FLOOR_OFFSET = 1.3111 * PLAYER_MODEL_SCALE
+BOX_DIR = Path(__file__).resolve().parent / "assets" / "box"
+try:
+    CHEST_MODEL = load_model("box.obj", folder=BOX_DIR, use_deepcopy=True)
+    CHEST_TEXTURE = load_texture("box.png", folder=BOX_DIR)
+except Exception:
+    CHEST_MODEL = "cube"
+    CHEST_TEXTURE = None
 EMOJI_DIR = Path(__file__).resolve().parent / "assets" / "emojis"
-ATTACKS = ("sob", "moai", "knockback", "fire", "bomb", "ice", "comet")
-ATTACK_EMOJI = {
-    "sob": "\U0001F62D",
-    "moai": "\U0001F5FF",
-    "knockback": "\U0001FAEA",
-    "fire": "\U0001F525",
-    "bomb": "\U0001F4A3",
-    "ice": "\U00002744",
-    "comet": "\U00002604",
-}
+ATTACKS = ("ice", "fire", "moai", "sob", "knockback", "bomb", "comet")
 ATTACK_LABEL = {
-    "sob": "tears",
-    "moai": "moai",
-    "knockback": "knockback",
-    "fire": "fire",
-    "bomb": "bomb",
     "ice": "ice",
+    "fire": "fire",
+    "moai": "moai",
+    "sob": "tears",
+    "knockback": "knockback",
+    "bomb": "bomb",
     "comet": "comet",
 }
+LOOT_TABLE = [
+    ("ice", 40, (3, 6)),
+    ("fire", 25, (2, 4)),
+    ("moai", 15, (2, 3)),
+    ("sob", 10, (1, 2)),
+    ("knockback", 6, (1, 2)),
+    ("bomb", 3, (1, 1)),
+    ("comet", 1, (1, 1)),
+]
+CHEST_POSITIONS = [
+    (0.0, 0.0, 8.0),
+    (0.0, 0.0, -8.0),
+    (8.0, 0.0, 0.0),
+    (-8.0, 0.0, 0.0),
+    (14.0, 0.0, 14.0),
+    (-14.0, 0.0, 14.0),
+    (14.0, 0.0, -14.0),
+    (-14.0, 0.0, -14.0),
+    (18.0, 0.0, 0.0),
+    (-18.0, 0.0, 0.0),
+    (0.0, 0.0, 18.0),
+    (0.0, 0.0, -18.0),
+]
+CHEST_RESPAWN_TIME = 20.0
 ATTACK_TEXTURES = {
     attack: load_texture(f"{attack}.png", folder=EMOJI_DIR)
     for attack in ATTACKS
@@ -60,12 +83,21 @@ ATTACK_DAMAGE = {
 FIRE_DAMAGE_PERCENT = 5
 ATTACK_SPEED = {
     "sob": 16,
-    "moai": 13,
+    "moai": 8,
     "knockback": 13,
     "fire": 15,
     "bomb": 12,
     "ice": 15,
     "comet": 18,
+}
+ATTACK_GRAVITY = {
+    "sob": 18,
+    "moai": 32,
+    "knockback": 18,
+    "fire": 18,
+    "bomb": 24,
+    "ice": 18,
+    "comet": 24,
 }
 ATTACK_KNOCKBACK = 30
 ATTACK_ICON_SCALE = 1.5
@@ -90,6 +122,7 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
         self._position_update_timer = 0
         self._attack_cooldown = 0
         self._attack_index = 0
+        self.match_ended = False
         self.flood = None
         self._flood_remaining = 0
         self.health = 0 if self.network.comet_struck else 100
@@ -104,6 +137,13 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
         self._normal_player_jump_height = None
         self.comet_available = self.network.comet_available
         self._block_mesh_groups = []
+        self.ammo = {attack: 0 for attack in ATTACKS}
+        self.chests = []
+        self.hotbar_slots = []
+        self.interact_prompt = None
+        self.loot_banner = None
+        self.loot_banner_icons = []
+        self._loot_banner_timer = 0
         super().__init__(
             world_width=world_width,
             world_depth=world_depth,
@@ -121,6 +161,8 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
         groups = {}
         for block in self.blocks.values():
             texture = block.block_texture
+            if texture == "box":
+                continue
             group = groups.get(texture)
             if group is None:
                 group = Entity(parent=scene, texture=texture)
@@ -150,36 +192,262 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
         )
         if self.status_text:
             self.status_text.text = (
-                f"Connected to host as {self.network.player_id[:8]}  |  "
-                "WASD/ZQSD: walk  |  Space: jump  |  "
-                f"L-click: throw {ATTACK_LABEL[ATTACKS[self._attack_index]]}  |  "
-                "R-click: switch attack"
+                f"Connected as {self.network.player_id[:8]}  |  "
+                "WASD: move  |  Space: jump  |  "
+                "1-7 / Scroll: hotbar  |  L-click: throw  |  E: open chest"
             )
+        self.interact_prompt = Text(
+            parent=camera.ui,
+            text="",
+            origin=(0, 0),
+            position=(0, -0.22),
+            scale=1.2,
+            color=color.yellow,
+            background=True,
+            visible=False,
+        )
+        self.loot_banner = Text(
+            parent=camera.ui,
+            text="",
+            origin=(0, 0),
+            position=(0, -0.12),
+            scale=1.3,
+            color=color.gold,
+            background=True,
+            visible=False,
+        )
+        self._build_hotbar()
+        self._build_chests()
+        self._show_loot_banner("Open a loot chest to collect emojis! ([E])")
+
+    def _build_hotbar(self):
+        slot_size = 0.08
+        slot_gap = 0.088
+        start_x = -(3 * slot_gap)
+        y = -0.42
+        for i, attack in enumerate(ATTACKS):
+            x = start_x + i * slot_gap
+            border = Entity(
+                parent=camera.ui,
+                model="quad",
+                scale=(slot_size + 0.008, slot_size + 0.008),
+                position=(x, y, 0.02),
+                color=color.gold if i == self._attack_index else color.rgba(60, 60, 60, 180),
+            )
+            bg = Entity(
+                parent=camera.ui,
+                model="quad",
+                scale=(slot_size, slot_size),
+                position=(x, y, 0.01),
+                color=color.rgba(20, 20, 20, 220),
+            )
+            icon = Entity(
+                parent=camera.ui,
+                model="quad",
+                texture=ATTACK_TEXTURES[attack],
+                scale=(slot_size * 0.72, slot_size * 0.72),
+                position=(x, y, 0.0),
+                color=color.white if self.ammo.get(attack, 0) > 0 else color.rgba(180, 180, 180, 100),
+            )
+            num_text = Text(
+                parent=camera.ui,
+                text=str(i + 1),
+                position=(x - slot_size * 0.42, y + slot_size * 0.42, -0.01),
+                scale=0.75,
+                color=color.light_gray,
+            )
+            count_text = Text(
+                parent=camera.ui,
+                text=str(self.ammo.get(attack, 0)),
+                position=(x + slot_size * 0.12, y - slot_size * 0.22, -0.01),
+                scale=0.85,
+                color=color.white if self.ammo.get(attack, 0) > 0 else color.red,
+            )
+            self.hotbar_slots.append({
+                "border": border,
+                "bg": bg,
+                "icon": icon,
+                "num_text": num_text,
+                "count_text": count_text,
+                "attack": attack,
+            })
+        self._update_hotbar_ui()
+
+    def _build_chests(self):
+        opened_set = set(getattr(self.network, "opened_chests", []))
+        for i, pos in enumerate(CHEST_POSITIONS):
+            chest_ent = Entity(
+                model=(
+                    load_model("box.obj", folder=BOX_DIR, use_deepcopy=True)
+                    if CHEST_MODEL != "cube"
+                    else "cube"
+                ),
+                texture=CHEST_TEXTURE,
+                position=(pos[0], pos[1], pos[2]),
+                scale=3.5 if CHEST_MODEL != "cube" else 1.0,
+                color=color.white if CHEST_TEXTURE else color.rgb(218, 145, 32),
+                collider="box",
+            )
+            is_opened = i in opened_set
+            if is_opened:
+                chest_ent.visible = False
+                chest_ent.collider = None
+            self.chests.append({
+                "id": i,
+                "entity": chest_ent,
+                "position": Vec3(pos[0], pos[1], pos[2]),
+                "is_opened": is_opened,
+                "respawn_timer": CHEST_RESPAWN_TIME if is_opened else 0.0,
+            })
+
+    def _select_slot(self, index):
+        if 0 <= index < len(ATTACKS):
+            self._attack_index = index
+            self._update_hotbar_ui()
+
+    def _update_hotbar_ui(self):
+        for i, slot in enumerate(self.hotbar_slots):
+            attack = slot["attack"]
+            count = self.ammo.get(attack, 0)
+            if i == self._attack_index:
+                slot["border"].color = color.gold
+                slot["border"].scale = (0.092, 0.092)
+            else:
+                slot["border"].color = color.rgba(60, 60, 60, 180)
+                slot["border"].scale = (0.088, 0.088)
+            slot["count_text"].text = str(count)
+            if count > 0:
+                slot["count_text"].color = color.white
+                slot["icon"].color = color.white
+            else:
+                slot["count_text"].color = color.red
+                slot["icon"].color = color.rgba(180, 180, 180, 100)
+
+    def _show_loot_banner(self, text, icons=()):
+        if self.loot_banner:
+            self.loot_banner.text = text
+            self.loot_banner.visible = True
+            self._loot_banner_timer = 3.0
+        for icon in self.loot_banner_icons:
+            destroy(icon)
+        self.loot_banner_icons = []
+        spacing = 0.05
+        start_x = -(len(icons) - 1) * spacing / 2
+        for index, attack in enumerate(icons):
+            icon = Entity(
+                parent=camera.ui,
+                model="quad",
+                texture=ATTACK_TEXTURES[attack],
+                scale=0.035,
+                position=(start_x + index * spacing, -0.2, 0),
+            )
+            self.loot_banner_icons.append(icon)
+
+    def _roll_loot(self):
+        num_drops = random.randint(2, 3)
+        items = [entry[0] for entry in LOOT_TABLE]
+        weights = [entry[1] for entry in LOOT_TABLE]
+        picked = random.choices(items, weights=weights, k=num_drops)
+        loot = {}
+        for item in picked:
+            entry = next(e for e in LOOT_TABLE if e[0] == item)
+            qty = random.randint(entry[2][0], entry[2][1])
+            loot[item] = loot.get(item, 0) + qty
+        return loot
+
+    def _open_chest(self, chest):
+        if chest["is_opened"]:
+            return
+        chest["is_opened"] = True
+        chest["respawn_timer"] = CHEST_RESPAWN_TIME
+        chest["entity"].visible = False
+        chest["entity"].collider = None
+
+        loot = self._roll_loot()
+        parts = []
+        for attack, qty in loot.items():
+            self.ammo[attack] = self.ammo.get(attack, 0) + qty
+            parts.append(f"+{qty} {ATTACK_LABEL[attack]}")
+        self._update_hotbar_ui()
+
+        loot_str = "  ".join(parts)
+        self._show_loot_banner(f"Loot: {loot_str}", icons=loot)
+
+        for attack in loot:
+            pop = Entity(
+                parent=scene,
+                model="quad",
+                texture=ATTACK_TEXTURES[attack],
+                position=chest["position"] + Vec3(0, 1.2, 0),
+                scale=0.8,
+                billboard=True,
+            )
+            pop.animate_position(
+                pop.position + Vec3((random.random() - 0.5) * 2, 2.0, (random.random() - 0.5) * 2),
+                duration=0.8,
+            )
+            destroy(pop, delay=0.8)
+
+        if self.network.connected:
+            self.network.send_chest_opened(chest["id"])
+
+    def _remote_open_chest(self, chest_id):
+        for chest in self.chests:
+            if chest["id"] == chest_id and not chest["is_opened"]:
+                chest["is_opened"] = True
+                chest["respawn_timer"] = CHEST_RESPAWN_TIME
+                chest["entity"].visible = False
+                chest["entity"].collider = None
+                break
+
+    def _try_interact_chest(self):
+        player_pos = self.player.world_position
+        for chest in self.chests:
+            if not chest["is_opened"] and (chest["position"] - player_pos).length() < 3.5:
+                self._open_chest(chest)
+                return True
+        return False
 
     def input(self, key):
-        if key == "left mouse down":
-            self._throw_attack()
+        if self.match_ended:
+            return
+        if key in ("1", "2", "3", "4", "5", "6", "7"):
+            self._select_slot(int(key) - 1)
+        elif key == "scroll up":
+            self._select_slot((self._attack_index - 1) % len(ATTACKS))
+        elif key == "scroll down":
+            self._select_slot((self._attack_index + 1) % len(ATTACKS))
         elif key == "right mouse down":
-            self._switch_attack()
-
-    def _switch_attack(self):
-        self._attack_index = (self._attack_index + 1) % len(ATTACKS)
-        attack = ATTACKS[self._attack_index]
-        if self.status_text:
-            self.status_text.text = (
-                f"Selected {ATTACK_LABEL[attack]}  |  L-click: throw  |  "
-                "R-click: switch attack"
-            )
+            self._select_slot((self._attack_index + 1) % len(ATTACKS))
+        elif key in ("e", "E"):
+            self._try_interact_chest()
+        elif key == "left mouse down":
+            hit_info = raycast(camera.world_position, camera.forward, distance=4.5, ignore=[self.player])
+            if hit_info.hit:
+                for chest in self.chests:
+                    if not chest["is_opened"] and hit_info.entity == chest["entity"]:
+                        self._open_chest(chest)
+                        return
+            self._throw_attack()
 
     def _throw_attack(self):
         if self._attack_cooldown > 0:
             return
 
         attack = ATTACKS[self._attack_index]
-        if attack == "comet" and not self.comet_available:
-            if self.status_text:
-                self.status_text.text = "The comet has already been used this match"
+        if self.ammo.get(attack, 0) <= 0:
+            self._show_loot_banner(
+                f"No {ATTACK_LABEL[attack]} left! Find a loot chest.",
+                icons=(attack,),
+            )
             return
+        if attack == "comet" and not self.comet_available:
+            self._show_loot_banner("De komeet is al gebruikt dit spel!")
+            return
+
+        self.ammo[attack] -= 1
+        self._update_hotbar_ui()
+
         direction = Vec3(camera.forward).normalized()
         origin = Vec3(camera.world_position) + direction * 0.8
         message = {
@@ -215,8 +483,19 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
                 self.comet_available = False
                 if self.status_text:
                     self.status_text.text = "The comet has already been used this match"
+            elif message_type == "match_end":
+                self.match_ended = True
+                reason = message.get("reason", "unknown")
+                self._show_loot_banner(f"Match ended (reason: {reason})")
+                if self.status_text:
+                    self.status_text.text = "Match ended"
+            elif message_type == "chest_opened":
+                self._remote_open_chest(message.get("chest_id"))
             elif message_type == "disconnected" and self.status_text:
                 self.status_text.text = f"Disconnected from host: {message['message']}"
+
+        if self.match_ended:
+            return
 
         self._update_projectiles()
         self._update_knockback()
@@ -227,6 +506,41 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
         self._update_remote_damage_flashes()
         self._check_void_death()
         self._check_death()
+
+        if self._loot_banner_timer > 0:
+            self._loot_banner_timer -= time.dt
+            if self._loot_banner_timer <= 0 and self.loot_banner:
+                self.loot_banner.visible = False
+                for icon in self.loot_banner_icons:
+                    destroy(icon)
+                self.loot_banner_icons = []
+
+        nearest_chest = None
+        nearest_dist = float("inf")
+        player_pos = self.player.world_position if self.player else Vec3(0, 0, 0)
+        for chest in self.chests:
+            if chest["is_opened"]:
+                chest["respawn_timer"] -= time.dt
+                if chest["respawn_timer"] <= 0:
+                    chest["is_opened"] = False
+                    chest["entity"].visible = True
+                    chest["entity"].collider = "box"
+            else:
+                dist = (chest["position"] - player_pos).length()
+                if dist < nearest_dist:
+                    nearest_dist = dist
+                    nearest_chest = chest
+
+        if nearest_chest and nearest_dist < 1.6:
+            self._open_chest(nearest_chest)
+        elif nearest_chest and nearest_dist < 3.2:
+            if self.interact_prompt:
+                self.interact_prompt.text = "Press [E] to open the loot chest"
+                self.interact_prompt.visible = True
+        else:
+            if self.interact_prompt:
+                self.interact_prompt.visible = False
+
         self._attack_cooldown = max(0, self._attack_cooldown - time.dt)
         self._position_update_timer += time.dt
         if self._position_update_timer >= 0.1 and self.network.connected:
@@ -248,9 +562,10 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
         ):
             return
 
-        velocity = Vec3(*direction)
-        if velocity.length_squared() == 0:
+        launch_direction = Vec3(*direction)
+        if launch_direction.length_squared() == 0:
             return
+        launch_velocity = launch_direction.normalized() * ATTACK_SPEED[attack]
         visual = Entity(
             parent=scene,
             model="quad",
@@ -265,7 +580,7 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
                 "visual": visual,
                 "attack": attack,
                 "owner": message.get("id"),
-                "direction": velocity.normalized(),
+                "velocity": launch_velocity,
                 "age": 0,
             }
         )
@@ -273,10 +588,14 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
     def _update_projectiles(self):
         for projectile in self.projectiles[:]:
             visual = projectile["visual"]
-            direction = projectile["direction"]
             old_position = Vec3(visual.world_position)
-            step_length = ATTACK_SPEED[projectile["attack"]] * time.dt
-            new_position = old_position + direction * step_length
+            velocity = projectile["velocity"]
+            velocity.y -= ATTACK_GRAVITY[projectile["attack"]] * time.dt
+            projectile["velocity"] = velocity
+            displacement = velocity * time.dt
+            step_length = displacement.length()
+            direction = displacement.normalized() if step_length else Vec3(0, 0, 0)
+            new_position = old_position + displacement
             visual.world_position = new_position
             projectile["age"] += time.dt
 
@@ -289,6 +608,7 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
                     break
 
             hits_world = False
+            world_hit = None
             if target_id is None and step_length > 0:
                 world_hit = raycast(
                     old_position,
@@ -301,9 +621,11 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
             if target_id is None and not hits_world:
                 target_id = self._local_player_hit(projectile, new_position)
 
-            if target_id is not None or hits_world or projectile["age"] >= 2.5:
+            if target_id is not None or hits_world or projectile["age"] >= 4:
                 impact_position = (
-                    world_hit.world_point if hits_world else new_position
+                    world_hit.world_point
+                    if hits_world and world_hit is not None
+                    else new_position
                 )
                 self._projectile_impact(projectile, target_id, impact_position)
                 self.projectiles.remove(projectile)
@@ -342,10 +664,11 @@ class BaseWorldEnginePlayer(BuildWorldEngineBuilder):
             "fire",
             "ice",
         ):
+            impact_direction = projectile["velocity"].normalized()
             self.network.send_hit(
                 target_id,
                 attack,
-                projectile["direction"],
+                impact_direction,
             )
 
     def _receive_player_hit(self, message):

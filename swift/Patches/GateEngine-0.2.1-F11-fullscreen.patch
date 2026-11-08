@@ -1,0 +1,79 @@
+diff --git a/Sources/GateEngine/System/Window.swift b/Sources/GateEngine/System/Window.swift
+index 71796291..d465fffc 100644
+--- a/Sources/GateEngine/System/Window.swift
++++ b/Sources/GateEngine/System/Window.swift
+@@ -161,6 +161,14 @@ public struct WindowOptions: OptionSet {
+         self.windowBacking.setMousePosition(clampedToWindowFrame)
+     }
+ 
++    public func toggleFullScreen() {
++        #if os(Linux)
++        (windowBacking as? X11Window)?.toggleFullScreen()
++        #elseif os(macOS)
++        (windowBacking as? AppKitWindow)?.toggleFullScreen()
++        #endif
++    }
++
+     func show() {
+         self.windowBacking.show()
+     }
+diff --git a/Sources/GateEngine/System/Platforms/Linux/X11/X11Window.swift b/Sources/GateEngine/System/Platforms/Linux/X11/X11Window.swift
+index a6327c9a..a9aac6cf 100644
+--- a/Sources/GateEngine/System/Platforms/Linux/X11/X11Window.swift
++++ b/Sources/GateEngine/System/Platforms/Linux/X11/X11Window.swift
+@@ -276,6 +276,41 @@ final class X11Window: WindowBacking {
+         XFlush(xDisplay)
+     }
+ 
++    @MainActor func toggleFullScreen() {
++        let root = XRootWindow(xDisplay, Self.xScreen)
++        let stateAtom = XInternAtom(xDisplay, "_NET_WM_STATE", False)
++        let fullScreenAtom = XInternAtom(xDisplay, "_NET_WM_STATE_FULLSCREEN", False)
++        guard stateAtom != 0, fullScreenAtom != 0 else {
++            Log.error("Could not request X11 full-screen mode.")
++            return
++        }
++
++        var event = XEvent()
++        event.xclient.type = ClientMessage
++        event.xclient.serial = 0
++        event.xclient.send_event = True
++        event.xclient.display = xDisplay
++        event.xclient.window = xWindow
++        event.xclient.message_type = stateAtom
++        event.xclient.format = 32
++        event.xclient.data.l.0 = 2
++        event.xclient.data.l.1 = Int(fullScreenAtom)
++        event.xclient.data.l.2 = 0
++        event.xclient.data.l.3 = 1
++        event.xclient.data.l.4 = 0
++        let result = XSendEvent(
++            xDisplay,
++            root,
++            False,
++            Int(SubstructureRedirectMask | SubstructureNotifyMask),
++            &event
++        )
++        if result == 0 {
++            Log.error("Could not send X11 full-screen request.")
++        }
++        XFlush(xDisplay)
++    }
++
+     func scrollDeltaFromEvent(_ event: XButtonEvent) -> Position3? {
+         switch event.button {
+         case 4:
+diff --git a/Sources/GateEngine/System/Platforms/Apple/AppKit/AppKit/AppKitWindow.swift b/Sources/GateEngine/System/Platforms/Apple/AppKit/AppKit/AppKitWindow.swift
+index 1fe1dafd..d6b3646c 100644
+--- a/Sources/GateEngine/System/Platforms/Apple/AppKit/AppKit/AppKitWindow.swift
++++ b/Sources/GateEngine/System/Platforms/Apple/AppKit/AppKit/AppKitWindow.swift
+@@ -261,5 +261,9 @@ final class AppKitWindow: WindowBacking {
+         self.state = .shown
+     }
+ 
++    @MainActor func toggleFullScreen() {
++        self.nsWindowController.window?.toggleFullScreen(nil)
++    }
++
+     @MainActor public func close() {
+         if CVDisplayLinkIsRunning(self.displayLink) {

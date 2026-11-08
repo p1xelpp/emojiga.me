@@ -1,0 +1,54 @@
+diff --git a/Sources/GateEngine/System/Platforms/Linux/X11/X11Window.swift b/Sources/GateEngine/System/Platforms/Linux/X11/X11Window.swift
+index e43df707..a6327c9a 100644
+--- a/Sources/GateEngine/System/Platforms/Linux/X11/X11Window.swift
++++ b/Sources/GateEngine/System/Platforms/Linux/X11/X11Window.swift
+@@ -92,6 +92,7 @@ final class X11Window: WindowBacking {
+ 
+     lazy var xic: XIC = XCreateIC(XOpenIM(xDisplay, nil, nil, nil), xWindow)
+     private var previousKeyEvent: XKeyEvent = XKeyEvent()
++    private var previousLockedMousePosition: Position2?
+ 
+     @MainActor func processEvent(_ event: XEvent) {
+         @_transparent
+@@ -139,10 +140,26 @@ final class X11Window: WindowBacking {
+         case MotionNotify /*, ButtonMotionMask*/:
+             let event: XMotionEvent = event.xmotion
+             guard event.same_screen != 0 else { return }
++            let position = Position2(Float(event.x), Float(event.y))
++            let delta: Position2
++            if Game.shared.hid.mouse.locked {
++                let center = Position2(self.window.size / 2)
++                if position == center {
++                    delta = .zero
++                } else if let previous = previousLockedMousePosition {
++                    delta = previous == center ? position - center : position - previous
++                } else {
++                    delta = .zero
++                }
++                previousLockedMousePosition = position
++            } else {
++                delta = .zero
++                previousLockedMousePosition = nil
++            }
+             Game.shared.hid.mouseChange(
+                 event: .moved,
+-                position: Position2(Float(event.x), Float(event.y)),
+-                delta: .zero,
++                position: position,
++                delta: delta,
+                 window: self.window
+             )
+         case LeaveNotify:
+diff --git a/Sources/GateEngine/System/HID/Mouse/Mouse.swift b/Sources/GateEngine/System/HID/Mouse/Mouse.swift
+index e4385986..3f4c61ff 100644
+--- a/Sources/GateEngine/System/HID/Mouse/Mouse.swift
++++ b/Sources/GateEngine/System/HID/Mouse/Mouse.swift
+@@ -134,5 +134,8 @@ import GameMath
+         self.deltaPosition = self._nextDeltaPosition
+         self._nextDeltaPosition = .zero
+         if locked {
++            if let window {
++                preferredLockPosition = Position2(window.size / 2)
++            }
+             self.position = preferredLockPosition
+         }

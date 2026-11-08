@@ -14,6 +14,8 @@ from ursina import (
     color,
     destroy,
     held_keys,
+    load_model,
+    load_texture,
     raycast,
     scene,
     time,
@@ -24,8 +26,28 @@ from ursina.prefabs.first_person_controller import FirstPersonController
 from Controller import enable_zqsd_controls
 
 
+BOX_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "box"
+BOX_TEXTURE = load_texture("box.png", folder=BOX_ASSET_DIR)
+
+
 class Block(Entity):
     def __init__(self, position=(0, 0, 0), scale=1, texture="white_cube", color=color.gray):
+        if texture == "box":
+            super().__init__(
+                position=position,
+                scale=scale,
+                collider="box",
+            )
+            Entity(
+                parent=self,
+                model=load_model("box.obj", folder=BOX_ASSET_DIR, use_deepcopy=True),
+                texture=BOX_TEXTURE,
+                position=(0, -0.5, 0),
+                scale=4,
+            )
+            self.block_texture = texture
+            return
+
         super().__init__(
             model="cube",
             texture=texture,
@@ -90,7 +112,10 @@ class BaseWorldEngine:
             scale=(self.world_width, 1, self.world_depth),
             texture="white_cube",
             color=color.green,
-            texture_scale=(self.world_width, self.world_depth),
+            texture_scale=(
+                self.world_width / self.block_size,
+                self.world_depth / self.block_size,
+            ),
             collider="box",
         )
         self.player = FirstPersonController(position=(0, 2, 0), speed=7)

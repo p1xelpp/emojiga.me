@@ -43,7 +43,30 @@ class HostServer:
         self._clients = {}
         self._flood_expires_at = 0.0
         self._comet_used = False
+        self._opened_chests = {}
+        self._beacon_stop = threading.Event()
+        self._beacon_thread = threading.Thread(target=self._run_beacon, daemon=True)
+        self._beacon_thread.start()
         self._server = self._make_server()
+
+    def _run_beacon(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", 27015))
+            sock.settimeout(1.0)
+            while not self._beacon_stop.is_set():
+                try:
+                    data, addr = sock.recvfrom(256)
+                    if data == b"EMOJI_MATCH_PING":
+                        sock.sendto(f"EMOJI_MATCH_PONG:{self.port}".encode("utf-8"), addr)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+            sock.close()
+        except OSError:
+            pass
 
     def _make_server(self):
         owner = self
@@ -80,6 +103,12 @@ class HostServer:
                     ]
                     flood_remaining = max(0, owner._flood_expires_at - time.time())
                     comet_struck = owner._comet_used
+                    now = time.time()
+                    opened_chests = [
+                        int(cid)
+                        for cid, t in owner._opened_chests.items()
+                        if now - t < 20.0
+                    ]
                     owner._clients[player_id] = client
                     client.send(
                         {
@@ -90,6 +119,7 @@ class HostServer:
                             "flood_remaining": flood_remaining,
                             "comet_available": not comet_struck,
                             "comet_struck": comet_struck,
+                            "opened_chests": opened_chests,
                         }
                     )
                 owner._broadcast(
@@ -143,6 +173,16 @@ class HostServer:
                 or not self._valid_vector(direction)
             ):
                 return
+            if attack_type == "comet":
+                with self._lock:
+                    if self._comet_used:
+                        accepted = False
+                    else:
+                        self._comet_used = True
+                        accepted = True
+                if not accepted:
+                    client.send({"type": "comet_unavailable"})
+                    return
             self._broadcast(
                 {
                     "type": "attack",
@@ -162,6 +202,9 @@ class HostServer:
                         "remaining": 3,
                     }
                 )
+            if attack_type == "comet":
+                self._broadcast({"type": "match_end", "reason": "comet_used"})
+                self._shutdown()
             return
 
         if message.get("type") == "player_hit":
@@ -205,6 +248,22 @@ class HostServer:
 
         if message.get("type") == "death":
             print(f"Player {client.player_id} died")
+            return
+
+        if message.get("type") == "chest_opened":
+            chest_id = message.get("chest_id")
+            if not isinstance(chest_id, int):
+                return
+            with self._lock:
+                self._opened_chests[chest_id] = time.time()
+            self._broadcast(
+                {
+                    "type": "chest_opened",
+                    "chest_id": chest_id,
+                    "player_id": client.player_id,
+                },
+                exclude=client.player_id,
+            )
             return
 
         if message.get("type") != "position":
@@ -255,6 +314,10 @@ class HostServer:
             except OSError:
                 pass
 
+    def _shutdown(self):
+        self._beacon_stop.set()
+        self._server.shutdown()
+
     def serve_forever(self):
         print(
             f"Hosting {self.world_path} on {self.host}:{self.port}. "
@@ -265,7 +328,38 @@ class HostServer:
         except KeyboardInterrupt:
             print("\nStopping host server.")
         finally:
+            self._beacon_stop.set()
             self._server.server_close()
+
+
+def find_match(timeout=0.6):
+    """Finds an active match via LAN broadcast beacon or localhost probe."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(timeout)
+        sock.sendto(b"EMOJI_MATCH_PING", ("<broadcast>", 27015))
+        try:
+            data, addr = sock.recvfrom(256)
+            if data.startswith(b"EMOJI_MATCH_PONG"):
+                parts = data.decode("utf-8").split(":")
+                port = int(parts[1]) if len(parts) > 1 else DEFAULT_PORT
+                sock.close()
+                return addr[0], port
+        except socket.timeout:
+            pass
+        sock.close()
+    except OSError:
+        pass
+
+    try:
+        sock = socket.create_connection(("127.0.0.1", DEFAULT_PORT), timeout=0.25)
+        sock.close()
+        return "127.0.0.1", DEFAULT_PORT
+    except OSError:
+        pass
+
+    return None
 
 
 class WorldClient:
@@ -290,6 +384,7 @@ class WorldClient:
         self.flood_remaining = response.get("flood_remaining", 0)
         self.comet_available = response.get("comet_available", True)
         self.comet_struck = response.get("comet_struck", False)
+        self.opened_chests = response.get("opened_chests", [])
         self.events.put({"type": "initial_players", "players": response["players"]})
         self._socket.settimeout(None)
         self._receiver = threading.Thread(target=self._receive_loop, daemon=True)
@@ -385,6 +480,15 @@ class WorldClient:
             return
         try:
             self._send({"type": "death"})
+        except OSError as error:
+            self.connected = False
+            self.events.put({"type": "disconnected", "message": str(error)})
+
+    def send_chest_opened(self, chest_id):
+        if not self.connected:
+            return
+        try:
+            self._send({"type": "chest_opened", "chest_id": int(chest_id)})
         except OSError as error:
             self.connected = False
             self.events.put({"type": "disconnected", "message": str(error)})

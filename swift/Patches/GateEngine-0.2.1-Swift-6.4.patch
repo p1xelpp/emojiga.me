@@ -1,0 +1,40 @@
+diff --git a/Sources/GameMath/2D Types/Transform2.swift b/Sources/GameMath/2D Types/Transform2.swift
+index c27ccbef..16efb44f 100755
+--- a/Sources/GameMath/2D Types/Transform2.swift
++++ b/Sources/GameMath/2D Types/Transform2.swift
+@@ -38,6 +38,12 @@ public struct Transform2: Sendable {
+     private lazy var _matrix: Matrix4x4 = .identity
+     private lazy var _rotationMatrix: Matrix4x4 = .identity
+     private lazy var _scaleMatrix: Matrix4x4 = .identity
++
++    public init(position: Position2 = .zero, rotation: Degrees = 0, scale: Size2 = .one) {
++        self.position = position
++        self.rotation = rotation
++        self.scale = scale
++    }
+ }
+ #else
+ public struct Transform2: Sendable {
+@@ -73,17 +79,16 @@ public struct Transform2: Sendable {
+     private lazy var _matrix: Matrix4x4 = .identity
+     private lazy var _rotationMatrix: Matrix4x4 = .identity
+     private lazy var _scaleMatrix: Matrix4x4 = .identity
+-}
+-#endif
+ 
+-public extension Transform2 {
+-    @inlinable
+-    init(position: Position2 = .zero, rotation: Degrees = 0, scale: Size2 = .one) {
++    public init(position: Position2 = .zero, rotation: Degrees = 0, scale: Size2 = .one) {
+         self.position = position
+         self.rotation = rotation
+         self.scale = scale
+     }
+-    
++}
++#endif
++
++public extension Transform2 {
+     @_transparent
+     var isFinite: Bool {
+         return position.isFinite && scale.isFinite && rotation.isFinite
